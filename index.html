@@ -376,7 +376,7 @@ html[data-theme="dark"] .password .eye{color:#cbd5e1}
   <div class="toolbar">
     <div>
       <h2>Customer Accounts</h2>
-      <span style="color:#6b7280">Accounts stored securely in Firebase Authentication</span><div class="admin-security-note">Customer passwords are handled by Firebase Authentication and are not stored in this webpage.</div>
+      <span style="color:#6b7280">Accounts created on this device</span><div class="admin-security-note">Demo note: this local HTML stores passwords locally. For a real online store, passwords should be securely hashed on a server and never displayed.</div>
     </div>
     <strong id="accountCountBadge" style="padding:7px 10px;border-radius:999px;background:#fff1eb;color:#f85606">0 Accounts</strong>
   </div>
@@ -438,20 +438,17 @@ const defaultProducts=[
 {id:7,name:"Desk Lamp",cat:"Home",price:1450,old:1700,stock:10,icon:"💡",image:"",desc:"Minimal desk lamp for study and work."},
 {id:8,name:"Bluetooth Speaker",cat:"Electronics",price:1750,old:2100,stock:14,icon:"🔊",image:"",desc:"Portable speaker with powerful sound."}
 ];
-let products=[...defaultProducts];
-let orders=[];
+let products=JSON.parse(localStorage.getItem("shophub_pro_products")||"null")||defaultProducts;
+let orders=JSON.parse(localStorage.getItem("shophub_pro_orders")||"[]");
 let cart=JSON.parse(localStorage.getItem("shophub_pro_cart")||"[]");
 let activeCat="All",adminLogged=false;
 
 async function save(){
   localStorage.setItem("shophub_pro_cart",JSON.stringify(cart));
+  localStorage.setItem("shophub_pro_products",JSON.stringify(products));
+  localStorage.setItem("shophub_pro_orders",JSON.stringify(orders));
   if(!window.shopHubDB) return;
   try{
-    const user=window.shopHubAuth?.currentUser;
-    if(user && !adminLogged){
-      await window.shopHubDB.collection("customers").doc(user.uid).set({cart},{merge:true});
-      return;
-    }
     const batch=window.shopHubDB.batch();
     products.forEach(p=>batch.set(window.shopHubDB.collection("products").doc(String(p.id)),p));
     const existing=await window.shopHubDB.collection("products").get();
@@ -522,13 +519,26 @@ function openLogin(){
   openModal();setTimeout(()=>document.getElementById("adminEmail")?.focus(),100)
 }
 function togglePass(){const x=document.getElementById("adminPass");x.type=x.type==="password"?"text":"password"}
-function loginAdmin(){
+async function loginAdmin(){
   const email=(document.getElementById("adminEmail")?.value||"").trim().toLowerCase();
   const pass=document.getElementById("adminPass")?.value||"";
-  if(email!==ADMIN_EMAIL.toLowerCase() || pass!==ADMIN_PASSWORD)return toast("Incorrect admin email or password");
-  adminLogged=true;sessionStorage.setItem("shophub_admin","1");closeModal();showAdmin()
+  if(!email||!pass)return toast("Enter admin email and password");
+  if(!window.shopHubAuth)return toast("Firebase is not ready yet. Refresh the page.");
+  try{
+    const cred=await shopHubAuth.signInWithEmailAndPassword(email,pass);
+    if((cred.user.email||"").toLowerCase()!==ADMIN_EMAIL.toLowerCase()){
+      await shopHubAuth.signOut();
+      return toast("This account is not the store admin.");
+    }
+    adminLogged=true;sessionStorage.setItem("shophub_admin","1");closeModal();showAdmin();
+    setTimeout(()=>{if(typeof loadCloud==="function")loadCloud()},300);
+  }catch(e){toast("Incorrect admin email or password.")}
 }
-function logoutAdmin(){adminLogged=false;sessionStorage.removeItem("shophub_admin");history.replaceState(null,"",location.pathname+location.search);showStore()}
+async function logoutAdmin(){
+  adminLogged=false;sessionStorage.removeItem("shophub_admin");
+  try{await window.shopHubAuth?.signOut()}catch(e){}
+  history.replaceState(null,"",location.pathname+location.search);showStore()
+}
 function showAdmin(){if(!adminLogged)return openLogin();if(!location.hash)history.replaceState(null,"",location.pathname+location.search+"#/admin");document.getElementById("store").classList.add("hidden");document.getElementById("adminApp").classList.remove("hidden");renderAdmin()}
 function showStore(){document.getElementById("adminApp").classList.add("hidden");document.getElementById("customerPage")?.classList.remove("active");document.getElementById("store").classList.remove("hidden");renderStore()}
 
@@ -683,7 +693,7 @@ function handleRoute(){
   }
 }
 window.addEventListener("hashchange",handleRoute);
-if(sessionStorage.getItem("shophub_admin")==="1")adminLogged=true;
+if(sessionStorage.getItem("shophub_admin")==="1")adminLogged=false;
 renderStore();
 handleRoute();
 
@@ -1465,15 +1475,19 @@ handleRoute();
         products=[...defaultProducts];
       }else products=ps.docs.map(d=>d.data());
       orders=os.docs.map(d=>d.data());
+      localStorage.setItem("shophub_pro_products",JSON.stringify(products));
+      localStorage.setItem("shophub_pro_orders",JSON.stringify(orders));
       renderStore(); if(typeof renderAdmin==="function" && adminLogged) renderAdmin();
     }catch(e){console.error("Cloud load failed",e)}
 
     shopHubDB.collection("products").onSnapshot(s=>{
       products=s.docs.map(d=>d.data());
+      localStorage.setItem("shophub_pro_products",JSON.stringify(products));
       renderStore(); if(typeof renderAdmin==="function" && adminLogged) renderAdmin();
     },e=>console.error("Product listener",e));
     shopHubDB.collection("orders").onSnapshot(s=>{
       orders=s.docs.map(d=>d.data()).sort((a,b)=>String(b.createdAt||b.id).localeCompare(String(a.createdAt||a.id)));
+      localStorage.setItem("shophub_pro_orders",JSON.stringify(orders));
       if(typeof renderAdmin==="function" && adminLogged) renderAdmin();
     },e=>console.error("Order listener",e));
   }
@@ -1502,9 +1516,6 @@ handleRoute();
     const email=(document.getElementById("signinEmail")?.value||"").trim().toLowerCase();
     const password=document.getElementById("signinPassword")?.value||"";
     if(!email||!password)return toast("Enter your email and password.");
-    if(email===ADMIN_EMAIL.toLowerCase() && password===ADMIN_PASSWORD){
-      adminLogged=true;sessionStorage.setItem("shophub_admin","1");closeAccountUI();showAdmin();return;
-    }
     if(!window.shopHubAuth)return toast("Firebase is not configured yet.");
     try{
       const cred=await shopHubAuth.signInWithEmailAndPassword(email,password);
@@ -1545,16 +1556,15 @@ handleRoute();
   if(window.shopHubAuth){
     shopHubAuth.onAuthStateChanged(async u=>{
       if(u){
-        let d={};try{
-          const s=await shopHubDB.collection("customers").doc(u.uid).get();
-          if(s.exists)d=s.data();
-        }catch(e){}
-        if(!adminLogged && Array.isArray(d.cart)){
-          cart=d.cart;
-          localStorage.setItem("shophub_pro_cart",JSON.stringify(cart));
-          renderStore();
+        if((u.email||"").toLowerCase()===ADMIN_EMAIL.toLowerCase()){
+          adminLogged=true;sessionStorage.setItem("shophub_admin","1");
+          try{await loadCloud()}catch(e){}
+        }else{
+          let d={};try{const s=await shopHubDB.collection("customers").doc(u.uid).get();if(s.exists)d=s.data()}catch(e){}
+          setLocalSession({id:u.uid,name:d.name||u.displayName||u.email?.split("@")[0]||"Customer",email:u.email||"",photo:u.photoURL||d.photo||""});
         }
-        setLocalSession({id:u.uid,name:d.name||u.displayName||u.email?.split("@")[0]||"Customer",email:u.email||"",photo:u.photoURL||d.photo||""});
+      }else{
+        adminLogged=false;sessionStorage.removeItem("shophub_admin");
       }
       if(typeof refreshAccountUI==="function")refreshAccountUI();
     });
